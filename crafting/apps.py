@@ -5,5 +5,5 @@ class CraftingConfig(AppConfig):
     name = "crafting"
     label = "crafting"  # avoid conflicts
     verbose_name = "BallsDex Crafting"
-    dpy_package = "crafting.discord_ext"
+    dpy_package = "crafting.package"
     default_auto_field = "django.db.models.BigAutoField"
