@@ -75,7 +75,6 @@ All crafting attempts are logged for moderation and auditing.
 - Uses async `setup(bot)` and modern `app_commands`.
 - Fully compatible with BallsDex V3 models (Ball, BallInstance, Player, Special).
 - Designed to plug directly into the BallsDex V3 extra/custom package loader.
-- Uses `django-solo` for singleton settings management.
 
 This package feels native to BallsDex V3, consistent with existing official and community packages, and easy for admins to manage through the panel.
 

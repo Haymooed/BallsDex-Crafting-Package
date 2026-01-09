@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from django.contrib import admin
-from solo.admin import SingletonModelAdmin
 
 from .models import (
     CraftingIngredient,
@@ -21,8 +20,8 @@ if TYPE_CHECKING:
 
 
 @admin.register(CraftingSettings)
-class CraftingSettingsAdmin(SingletonModelAdmin):
-    """Singleton admin for crafting settings."""
+class CraftingSettingsAdmin(admin.ModelAdmin):
+    """Singleton-style admin for crafting settings."""
 
     fieldsets = (
         (
@@ -39,6 +38,12 @@ class CraftingSettingsAdmin(SingletonModelAdmin):
             },
         ),
     )
+
+    def has_add_permission(self, request):
+        # Only allow a single settings row
+        if CraftingSettings.objects.exists():
+            return False
+        return super().has_add_permission(request)
 
 
 @admin.register(CraftingItem)

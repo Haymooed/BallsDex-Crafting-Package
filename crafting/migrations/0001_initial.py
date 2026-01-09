@@ -7,7 +7,6 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("bd_models", "0001_initial"),
-        ("solo", "0001_initial"),
     ]
 
     operations = [

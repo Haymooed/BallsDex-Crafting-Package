@@ -12,7 +12,3 @@ authors = [
     { name = "Haymooed" },
 ]
 readme = "README.md"
-
-dependencies = [
-    "django-solo>=2.2.0",
-]

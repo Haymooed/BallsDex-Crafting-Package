@@ -5,12 +5,11 @@ from typing import Any
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
-from solo.models import SingletonModel
 
 from bd_models.models import Ball, BallInstance, Player, Special
 
 
-class CraftingSettings(SingletonModel):
+class CraftingSettings(models.Model):
     """Singleton configuration for crafting behaviour."""
 
     enabled = models.BooleanField(default=True, help_text="Globally enable crafting commands")
@@ -27,6 +26,16 @@ class CraftingSettings(SingletonModel):
 
     def __str__(self) -> str:
         return "Crafting Settings"
+
+    @classmethod
+    def get_solo(cls) -> "CraftingSettings":
+        """
+        Lightweight replacement for django-solo's get_solo().
+
+        Ensures there is always exactly one settings row.
+        """
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
 
 
 class CraftingItem(models.Model):
