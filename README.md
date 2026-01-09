@@ -12,7 +12,7 @@ Add the following entry to `config/extra.toml` so BallsDex installs the package 
 
 ```toml
 [[ballsdex.packages]]
-location = "git+https://github.com/Haymooed/MarketDex-PackagesV3.git"
+location = "git+https://github.com/Haymooed/BallsDex-Crafting-Package.git"
 path = "crafting"
 enabled = true
 editable = false
