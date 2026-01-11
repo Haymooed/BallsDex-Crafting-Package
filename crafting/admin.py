@@ -6,13 +6,11 @@ from django.contrib import admin
 
 from .models import (
     CraftingIngredient,
-    CraftingItem,
     CraftingLog,
     CraftingProfile,
     CraftingRecipe,
     CraftingRecipeState,
     CraftingSettings,
-    PlayerItemBalance,
 )
 
 if TYPE_CHECKING:
@@ -46,29 +44,13 @@ class CraftingSettingsAdmin(admin.ModelAdmin):
         return super().has_add_permission(request)
 
 
-@admin.register(CraftingItem)
-class CraftingItemAdmin(admin.ModelAdmin):
-    """Admin configuration for crafting items."""
-
-    list_display = ("name", "enabled")
-    list_filter = ("enabled",)
-    search_fields = ("name", "description")
-
-
-@admin.register(PlayerItemBalance)
-class PlayerItemBalanceAdmin(admin.ModelAdmin):
-    """Admin for player item balances."""
-
-    list_display = ("player", "item", "quantity")
-    search_fields = ("player__discord_id", "item__name")
-    list_filter = ("item",)
-
-
 class CraftingIngredientInline(admin.TabularInline):
     """Inline ingredient editor for recipes."""
 
     model = CraftingIngredient
     extra = 1
+    fields = ("ball", "quantity")
+    autocomplete_fields = ("ball",)
 
 
 @admin.register(CraftingRecipe)
@@ -76,10 +58,11 @@ class CraftingRecipeAdmin(admin.ModelAdmin):
     """Admin configuration for crafting recipes."""
 
     list_display = ("name", "enabled", "allow_auto", "result_summary", "cooldown_seconds", "updated_at")
-    list_filter = ("enabled", "allow_auto", "result_type")
+    list_filter = ("enabled", "allow_auto")
     search_fields = ("name", "description")
     inlines = (CraftingIngredientInline,)
     readonly_fields = ("created_at", "updated_at")
+    autocomplete_fields = ("result_ball", "result_special")
 
     fieldsets = (
         (
@@ -90,10 +73,8 @@ class CraftingRecipeAdmin(admin.ModelAdmin):
             "Result",
             {
                 "fields": (
-                    "result_type",
                     "result_ball",
                     "result_special",
-                    "result_item",
                     "result_quantity",
                 )
             },
@@ -107,9 +88,10 @@ class CraftingRecipeAdmin(admin.ModelAdmin):
     @admin.display(description="Result")
     def result_summary(self, obj: CraftingRecipe) -> str:
         """Human readable result description."""
-        if obj.result_type == CraftingRecipe.RESULT_BALL:
-            return f"{obj.result_quantity} × {obj.result_ball} (Special: {obj.result_special or 'None'})"
-        return f"{obj.result_quantity} × {obj.result_item}"
+        if obj.result_ball:
+            special = f" ({obj.result_special.name})" if obj.result_special else ""
+            return f"{obj.result_quantity} × {obj.result_ball.country}{special}"
+        return "No result configured"
 
 
 @admin.register(CraftingProfile)
@@ -118,6 +100,7 @@ class CraftingProfileAdmin(admin.ModelAdmin):
 
     list_display = ("player", "last_crafted_at")
     search_fields = ("player__discord_id",)
+    autocomplete_fields = ("player",)
 
 
 @admin.register(CraftingRecipeState)
@@ -127,6 +110,7 @@ class CraftingRecipeStateAdmin(admin.ModelAdmin):
     list_display = ("player", "recipe", "auto_enabled", "last_crafted_at")
     list_filter = ("auto_enabled",)
     search_fields = ("player__discord_id", "recipe__name")
+    autocomplete_fields = ("player", "recipe")
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("player", "recipe")
@@ -140,7 +124,7 @@ class CraftingLogAdmin(admin.ModelAdmin):
     list_filter = ("success", "recipe")
     search_fields = ("player__discord_id", "recipe__name", "message")
     readonly_fields = ("player", "recipe", "success", "message", "created_at")
+    autocomplete_fields = ("player", "recipe")
 
     def has_add_permission(self, request):
         return False
-

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import timedelta
-from typing import TYPE_CHECKING, Iterable, Sequence
+from typing import TYPE_CHECKING
 
 import discord
 from asgiref.sync import sync_to_async
@@ -15,13 +14,10 @@ from django.utils import timezone
 from bd_models.models import BallInstance, Player
 from ..models import (
     CraftingIngredient,
-    CraftingItem,
-    CraftingLog,
     CraftingProfile,
     CraftingRecipe,
     CraftingRecipeState,
     CraftingSettings,
-    PlayerItemBalance,
 )
 
 if TYPE_CHECKING:
@@ -72,12 +68,6 @@ async def recipe_autocomplete(interaction: Interaction, current: str) -> list[ap
     return [app_commands.Choice(name=name, value=name) for name in recipe_names[:25]]
 
 
-def ingredient_summary(ingredient: CraftingIngredient) -> str:
-    """Readable description for an ingredient."""
-    target = ingredient.ball or ingredient.item
-    return f"{ingredient.quantity} × {target} ({ingredient.get_ingredient_type_display()})"
-
-
 @dataclass
 class CraftOutcome:
     success: bool
@@ -87,98 +77,76 @@ class CraftOutcome:
 
 
 class CraftingCog(commands.GroupCog, name="craft"):
-    """Craft collectibles through admin-defined recipes."""
+    """Simple crafting system - combine balls to get new balls."""
 
     def __init__(self, bot: "BallsDexBot"):
         super().__init__()
         self.bot = bot
 
-    @property
-    def qualified_name(self) -> str:
-        return "craft"
-
     # ----- Internal helpers -----
 
     async def _get_recipe(self, name: str) -> CraftingRecipe | None:
         try:
-            return await CraftingRecipe.objects.select_related(
-                "result_ball", "result_item", "result_special"
+            return await CraftingRecipe.objects.select_related("result_ball", "result_special").prefetch_related(
+                "ingredients__ball"
             ).aget(name__iexact=name)
         except CraftingRecipe.DoesNotExist:
             return None
 
     async def _collect_ingredients(self, recipe: CraftingRecipe) -> list[CraftingIngredient]:
-        return await sync_to_async(list)(
-            recipe.ingredients.select_related("ball", "item").all()
-        )
+        return await sync_to_async(list)(recipe.ingredients.select_related("ball").all())
 
     async def _check_cooldowns(
         self,
         settings: CraftingSettings,
         profile: CraftingProfile,
         state: CraftingRecipeState,
+        recipe: CraftingRecipe,
     ) -> tuple[bool, float]:
         now = timezone.now()
-        remaining: float = 0
-        if settings.global_cooldown_seconds and profile.last_crafted_at:
-            delta = (profile.last_crafted_at + timedelta(seconds=settings.global_cooldown_seconds) - now).total_seconds()
-            remaining = max(remaining, delta)
-        if state.last_crafted_at and state.recipe.cooldown_seconds:
-            delta = (state.last_crafted_at + timedelta(seconds=state.recipe.cooldown_seconds) - now).total_seconds()
-            remaining = max(remaining, delta)
-        return remaining <= 0, max(0, remaining)
+        remaining = 0.0
+
+        # Check global cooldown
+        if profile.last_crafted_at:
+            elapsed = (now - profile.last_crafted_at).total_seconds()
+            required = settings.global_cooldown_seconds
+            if elapsed < required:
+                remaining = max(remaining, required - elapsed)
+
+        # Check recipe cooldown
+        if state.last_crafted_at:
+            elapsed = (now - state.last_crafted_at).total_seconds()
+            required = recipe.cooldown_seconds
+            if elapsed < required:
+                remaining = max(remaining, required - elapsed)
+
+        return remaining == 0, remaining
 
     async def _check_requirements(
-        self, player: Player, ingredients: Sequence[CraftingIngredient]
+        self, player: Player, ingredients: list[CraftingIngredient]
     ) -> tuple[bool, str]:
-        """Validate ingredient availability without consuming."""
+        """Check if player has all required ingredients."""
         for ingredient in ingredients:
-            if ingredient.ingredient_type == CraftingIngredient.INGREDIENT_BALL:
-                qs = BallInstance.objects.filter(
-                    player=player, ball=ingredient.ball, deleted=False
-                )
-                owned = await qs.acount()
-                if owned < ingredient.quantity:
-                    return False, f"You need {ingredient.quantity} × {ingredient.ball} (you have {owned})."
-            elif ingredient.ingredient_type == CraftingIngredient.INGREDIENT_ITEM:
-                balance, _ = await PlayerItemBalance.objects.aget_or_create(
-                    player=player, item=ingredient.item, defaults={"quantity": 0}
-                )
-                if balance.quantity < ingredient.quantity:
-                    return False, f"You need {ingredient.quantity} × {ingredient.item} (you have {balance.quantity})."
+            count = await BallInstance.objects.filter(
+                player=player, ball=ingredient.ball, deleted=False
+            ).acount()
+            if count < ingredient.quantity:
+                return False, f"You need {ingredient.quantity} × {ingredient.ball.country}, but you only have {count}."
         return True, ""
 
-    async def _consume_ingredients(self, player: Player, ingredients: Sequence[CraftingIngredient]) -> None:
-        """Consume balls/items after validation."""
+    async def _consume_ingredients(self, player: Player, ingredients: list[CraftingIngredient]) -> None:
+        """Consume required ball instances."""
         for ingredient in ingredients:
-            if ingredient.ingredient_type == CraftingIngredient.INGREDIENT_BALL and ingredient.ball:
-                qs = BallInstance.objects.filter(
-                    player=player, ball=ingredient.ball, deleted=False
-                ).order_by("catch_date")
-                ids = await sync_to_async(list)(qs.values_list("id", flat=True)[: ingredient.quantity])
-                if len(ids) < ingredient.quantity:
-                    raise RuntimeError("Insufficient ball instances during consumption.")
-                await BallInstance.objects.filter(id__in=ids).aupdate(deleted=True)
-            elif ingredient.ingredient_type == CraftingIngredient.INGREDIENT_ITEM and ingredient.item:
-                balance, _ = await PlayerItemBalance.objects.aget_or_create(
-                    player=player, item=ingredient.item, defaults={"quantity": 0}
-                )
-                if balance.quantity < ingredient.quantity:
-                    raise RuntimeError("Insufficient item balance during consumption.")
-                balance.quantity -= ingredient.quantity
-                await balance.asave(update_fields=("quantity",))
+            qs = BallInstance.objects.filter(
+                player=player, ball=ingredient.ball, deleted=False
+            ).order_by("catch_date")
+            ids = await sync_to_async(list)(qs.values_list("id", flat=True)[: ingredient.quantity])
+            if len(ids) < ingredient.quantity:
+                raise RuntimeError("Insufficient ball instances during consumption.")
+            await BallInstance.objects.filter(id__in=ids).aupdate(deleted=True)
 
     async def _grant_result(self, player: Player, recipe: CraftingRecipe) -> str:
         """Grant crafted reward."""
-        if recipe.result_type == CraftingRecipe.RESULT_ITEM and recipe.result_item:
-            balance, _ = await PlayerItemBalance.objects.aget_or_create(
-                player=player, item=recipe.result_item, defaults={"quantity": 0}
-            )
-            balance.quantity += recipe.result_quantity
-            await balance.asave(update_fields=("quantity",))
-            return f"Received {recipe.result_quantity} × {recipe.result_item.name}."
-
-        # Default to ball instance creation
         ball = recipe.result_ball
         if not ball:
             raise RuntimeError("Recipe missing ball result.")
@@ -225,7 +193,7 @@ class CraftingCog(commands.GroupCog, name="craft"):
 
         profile = await ensure_profile(player)
         state = await ensure_state(player, recipe)
-        ready, remaining = await self._check_cooldowns(settings, profile, state)
+        ready, remaining = await self._check_cooldowns(settings, profile, state, recipe)
         if not ready:
             return CraftOutcome(
                 False,
@@ -243,7 +211,7 @@ class CraftingCog(commands.GroupCog, name="craft"):
             # Do the async operations first
             await self._consume_ingredients(player, ingredients)
             result = await self._grant_result(player, recipe)
-            
+
             # Update cooldowns in a sync transaction
             def update_cooldowns():
                 with transaction.atomic():
@@ -251,33 +219,27 @@ class CraftingCog(commands.GroupCog, name="craft"):
                     profile.update_cooldown()
                     state.save(update_fields=("last_crafted_at",))
                     profile.save(update_fields=("last_crafted_at",))
-            
+
             await sync_to_async(update_cooldowns)()
             return result
-        
+
         result = await do_craft()
         return CraftOutcome(True, "Craft successful!", result_summary=result)
 
     def _recipe_embed(
-        self, recipe: CraftingRecipe, ingredients: Sequence[CraftingIngredient] | None = None
+        self, recipe: CraftingRecipe, ingredients: list[CraftingIngredient]
     ) -> discord.Embed:
         embed = discord.Embed(title=recipe.name, description=recipe.description or "No description provided.")
-        # Use provided ingredients list (already fetched) to avoid sync query
-        ingredient_list = ingredients if ingredients is not None else []
-        # Filter out items, only show balls
-        ball_ingredients = [i for i in ingredient_list if i.ingredient_type == CraftingIngredient.INGREDIENT_BALL]
-        ingredients_text = "\n".join(ingredient_summary(i) for i in ball_ingredients) or "None"
+        
+        # Ingredients
+        ingredients_text = "\n".join(f"{i.quantity} × {i.ball.country}" for i in ingredients) or "None"
         embed.add_field(name="Ingredients", value=ingredients_text, inline=False)
         
-        # Only show ball results (remove items)
-        if recipe.result_type == CraftingRecipe.RESULT_BALL and recipe.result_ball:
-            # result_ball should be cached from select_related
-            ball_name = recipe.result_ball.country
+        # Result
+        if recipe.result_ball:
             special = f" with {recipe.result_special.name}" if recipe.result_special else ""
-            result = f"{recipe.result_quantity} × {ball_name}{special}"
+            result = f"{recipe.result_quantity} × {recipe.result_ball.country}{special}"
             embed.add_field(name="Result", value=result, inline=False)
-        elif recipe.result_type == CraftingRecipe.RESULT_BALL:
-            embed.add_field(name="Result", value="No result configured", inline=False)
         
         cooldown_text = format_seconds(recipe.cooldown_seconds) if recipe.cooldown_seconds else "None"
         embed.add_field(name="Cooldown", value=cooldown_text, inline=True)
@@ -296,24 +258,22 @@ class CraftingCog(commands.GroupCog, name="craft"):
 
         recipes = await sync_to_async(list)(
             CraftingRecipe.objects.filter(enabled=True)
-            .select_related("result_ball", "result_item", "result_special")
-            .prefetch_related("ingredients", "ingredients__ball", "ingredients__item")
+            .select_related("result_ball", "result_special")
+            .prefetch_related("ingredients__ball")
         )
         if not recipes:
             await interaction.response.send_message("No crafting recipes are available right now.", ephemeral=True)
             return
 
         # Get ingredients for each recipe using prefetched data
-        # Since ingredients are prefetched, we can access them in sync context
         def get_ingredients(recipe: CraftingRecipe) -> list[CraftingIngredient]:
             return list(recipe.ingredients.all())
-        
+
         embeds = []
         for recipe in recipes[:10]:
-            # Access prefetched ingredients using sync_to_async
             ingredients_list = await sync_to_async(get_ingredients)(recipe)
             embeds.append(self._recipe_embed(recipe, ingredients_list))
-        
+
         await interaction.response.send_message(embeds=embeds, ephemeral=True)
 
     @app_commands.command(description="Craft a recipe if requirements are met.")
@@ -340,51 +300,66 @@ class CraftingCog(commands.GroupCog, name="craft"):
         else:
             await interaction.followup.send(f"❌ {outcome.message}", ephemeral=True)
 
-    @app_commands.command(
-        name="auto",
-        description="Automatically craft a recipe whenever possible until disabled.",
+    @app_commands.command(name="auto", description="Enable or disable auto-crafting for a recipe.")
+    @app_commands.describe(
+        recipe="Recipe name to auto-craft (or 'off' to disable)",
+        loops="Number of times to auto-craft (default: unlimited)"
     )
-    @app_commands.describe(recipe="Recipe to auto-craft (use 'off' or '0' to disable)")
     @app_commands.autocomplete(recipe=recipe_autocomplete)
     @app_commands.checks.bot_has_permissions(send_messages=True, embed_links=True)
-    async def craft_auto(self, interaction: Interaction, recipe: str):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        player = await ensure_player(interaction.user)
-        settings = await get_settings()
+    async def craft_auto(
+        self, interaction: Interaction, recipe: str, loops: int | None = None
+    ):
+        await interaction.response.defer(thinking=True)
 
-        if recipe.lower() in {"off", "stop", "0"}:
-            updated = await CraftingRecipeState.objects.filter(player=player, auto_enabled=True).aupdate(auto_enabled=False)
-            await interaction.followup.send(f"Auto-crafting disabled for {updated} recipe(s).", ephemeral=True)
-            return
+        if recipe.lower() in ("off", "0", "none", "disable"):
+            # Disable all auto-crafting
+            states = await sync_to_async(list)(
+                CraftingRecipeState.objects.filter(
+                    player__discord_id=interaction.user.id, auto_enabled=True
+                ).select_related("recipe")
+            )
+            if not states:
+                await interaction.followup.send("You don't have any auto-crafting enabled.", ephemeral=True)
+                return
 
-        if not settings.allow_auto_crafting:
-            await interaction.followup.send("Auto-crafting is disabled by admins.", ephemeral=True)
+            for state in states:
+                state.auto_enabled = False
+                await state.asave(update_fields=("auto_enabled",))
+
+            await interaction.followup.send("✅ Disabled all auto-crafting.", ephemeral=True)
             return
 
         recipe_obj = await self._get_recipe(recipe)
         if not recipe_obj:
             await interaction.followup.send(f"Recipe '{recipe}' was not found.", ephemeral=True)
             return
+
+        player = await ensure_player(interaction.user)
+        state = await ensure_state(player, recipe_obj)
+
+        settings = await get_settings()
+        if not settings.allow_auto_crafting:
+            await interaction.followup.send("Auto-crafting is disabled by admins.", ephemeral=True)
+            return
         if not recipe_obj.allow_auto:
             await interaction.followup.send("Auto-crafting is disabled for this recipe.", ephemeral=True)
             return
 
-        state = await ensure_state(player, recipe_obj)
+        # Enable auto-crafting
         state.auto_enabled = True
         await state.asave(update_fields=("auto_enabled",))
 
-        # Attempt to craft in a bounded loop respecting cooldowns.
+        max_loops = loops if loops else 999999
         crafted = 0
-        outcome: CraftOutcome | None = None
-        for _ in range(5):  # avoid infinite loops
+        outcome = None
+
+        for _ in range(max_loops):
             outcome = await self._perform_craft(player, recipe_obj, allow_auto=True)
-            await self._log_attempt(player, recipe_obj, outcome)
             if not outcome.success:
-                if outcome.next_retry_after and outcome.next_retry_after <= 30:
-                    await asyncio.sleep(outcome.next_retry_after)
-                    continue
                 break
             crafted += 1
+            await asyncio.sleep(0.5)  # Small delay between crafts
 
         if outcome and outcome.success:
             msg = f"Auto-crafted {crafted} time(s). Last result: {outcome.result_summary}"
@@ -396,6 +371,6 @@ class CraftingCog(commands.GroupCog, name="craft"):
         else:
             await interaction.followup.send("Auto-crafting finished with no attempts.", ephemeral=True)
 
-
-__all__ = ["CraftingCog"]
-
+        # Disable after completion
+        state.auto_enabled = False
+        await state.asave(update_fields=("auto_enabled",))
