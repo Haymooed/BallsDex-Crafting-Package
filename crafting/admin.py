@@ -6,10 +6,9 @@ from django.contrib import admin
 
 from .models import (
     CraftingIngredient,
-    CraftingLog,
-    CraftingProfile,
     CraftingRecipe,
-    CraftingRecipeState,
+    CraftingSession,
+    CraftingSessionItem,
     CraftingSettings,
 )
 
@@ -29,10 +28,7 @@ class CraftingSettingsAdmin(admin.ModelAdmin):
         (
             "Behaviour",
             {
-                "fields": (
-                    "global_cooldown_seconds",
-                    "allow_auto_crafting",
-                ),
+                "fields": ("session_timeout_minutes",),
             },
         ),
     )
@@ -57,8 +53,8 @@ class CraftingIngredientInline(admin.TabularInline):
 class CraftingRecipeAdmin(admin.ModelAdmin):
     """Admin configuration for crafting recipes."""
 
-    list_display = ("name", "enabled", "allow_auto", "result_summary", "cooldown_seconds", "updated_at")
-    list_filter = ("enabled", "allow_auto")
+    list_display = ("name", "enabled", "result_summary", "updated_at")
+    list_filter = ("enabled",)
     search_fields = ("name", "description")
     inlines = (CraftingIngredientInline,)
     readonly_fields = ("created_at", "updated_at")
@@ -67,7 +63,7 @@ class CraftingRecipeAdmin(admin.ModelAdmin):
     fieldsets = (
         (
             "Recipe Info",
-            {"fields": ("name", "description", "enabled", "allow_auto", "cooldown_seconds")},
+            {"fields": ("name", "description", "enabled")},
         ),
         (
             "Result",
@@ -94,37 +90,26 @@ class CraftingRecipeAdmin(admin.ModelAdmin):
         return "No result configured"
 
 
-@admin.register(CraftingProfile)
-class CraftingProfileAdmin(admin.ModelAdmin):
-    """Admin for crafting profiles."""
+class CraftingSessionItemInline(admin.TabularInline):
+    """Inline items for crafting sessions."""
 
-    list_display = ("player", "last_crafted_at")
+    model = CraftingSessionItem
+    extra = 0
+    fields = ("ball_instance",)
+    autocomplete_fields = ("ball_instance",)
+    readonly_fields = ("ball_instance",)
+
+
+@admin.register(CraftingSession)
+class CraftingSessionAdmin(admin.ModelAdmin):
+    """Admin for crafting sessions."""
+
+    list_display = ("player", "created_at", "expires_at", "is_expired_display")
     search_fields = ("player__discord_id",)
     autocomplete_fields = ("player",)
+    inlines = (CraftingSessionItemInline,)
+    readonly_fields = ("created_at", "expires_at")
 
-
-@admin.register(CraftingRecipeState)
-class CraftingRecipeStateAdmin(admin.ModelAdmin):
-    """Admin for per-recipe player state."""
-
-    list_display = ("player", "recipe", "auto_enabled", "last_crafted_at")
-    list_filter = ("auto_enabled",)
-    search_fields = ("player__discord_id", "recipe__name")
-    autocomplete_fields = ("player", "recipe")
-
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related("player", "recipe")
-
-
-@admin.register(CraftingLog)
-class CraftingLogAdmin(admin.ModelAdmin):
-    """Read-only audit log for crafting attempts."""
-
-    list_display = ("created_at", "player", "recipe", "success")
-    list_filter = ("success", "recipe")
-    search_fields = ("player__discord_id", "recipe__name", "message")
-    readonly_fields = ("player", "recipe", "success", "message", "created_at")
-    autocomplete_fields = ("player", "recipe")
-
-    def has_add_permission(self, request):
-        return False
+    @admin.display(description="Expired")
+    def is_expired_display(self, obj: CraftingSession) -> str:
+        return "Yes" if obj.is_expired() else "No"

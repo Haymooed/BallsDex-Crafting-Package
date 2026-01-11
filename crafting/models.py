@@ -10,12 +10,8 @@ class CraftingSettings(models.Model):
     """Singleton configuration for crafting behaviour."""
 
     enabled = models.BooleanField(default=True, help_text="Globally enable crafting commands")
-    global_cooldown_seconds = models.PositiveIntegerField(
-        default=10,
-        help_text="Global cooldown (in seconds) applied after any craft",
-    )
-    allow_auto_crafting = models.BooleanField(
-        default=False, help_text="Allow players to enable auto-crafting loops per recipe"
+    session_timeout_minutes = models.PositiveIntegerField(
+        default=10, help_text="How long crafting sessions last before expiring"
     )
 
     class Meta:
@@ -40,11 +36,7 @@ class CraftingRecipe(models.Model):
 
     name = models.CharField(max_length=128, unique=True)
     description = models.TextField(blank=True)
-    enabled = models.BooleanField(default=True, help_text="If disabled, players cannot view or craft this recipe.")
-    allow_auto = models.BooleanField(default=True, help_text="Allow players to enable auto-crafting for this recipe.")
-    cooldown_seconds = models.PositiveIntegerField(
-        default=0, help_text="Extra cooldown applied after crafting this recipe."
-    )
+    enabled = models.BooleanField(default=True, help_text="If disabled, players cannot craft this recipe.")
 
     # Result - always a ball
     result_ball = models.ForeignKey(
@@ -97,57 +89,34 @@ class CraftingIngredient(models.Model):
         return f"{self.quantity} x {self.ball.country}"
 
 
-class CraftingProfile(models.Model):
-    """Per-player crafting metadata such as cooldown tracking."""
+class CraftingSession(models.Model):
+    """Player's active crafting session with added ball instances."""
 
-    player = models.OneToOneField(Player, on_delete=models.CASCADE, related_name="crafting_profile")
-    last_crafted_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        verbose_name = "Crafting Profile"
-        verbose_name_plural = "Crafting Profiles"
-
-    def __str__(self) -> str:
-        return f"Profile for {self.player_id}"
-
-    def update_cooldown(self) -> None:
-        self.last_crafted_at = timezone.now()
-
-
-class CraftingRecipeState(models.Model):
-    """Per-player state for a recipe (cooldown and auto flag)."""
-
-    player = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="crafting_states")
-    recipe = models.ForeignKey(CraftingRecipe, on_delete=models.CASCADE, related_name="states")
-    last_crafted_at = models.DateTimeField(null=True, blank=True)
-    auto_enabled = models.BooleanField(default=False)
-
-    class Meta:
-        unique_together = ("player", "recipe")
-        verbose_name = "Crafting Recipe State"
-        verbose_name_plural = "Crafting Recipe States"
-
-    def __str__(self) -> str:
-        return f"State for {self.player_id} / {self.recipe.name}"
-
-    def update_cooldown(self) -> None:
-        self.last_crafted_at = timezone.now()
-
-
-class CraftingLog(models.Model):
-    """Audit log of crafting attempts."""
-
-    player = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="crafting_logs")
-    recipe = models.ForeignKey(CraftingRecipe, on_delete=models.CASCADE, related_name="logs")
-    success = models.BooleanField(default=True)
-    message = models.TextField(blank=True)
+    player = models.OneToOneField(Player, on_delete=models.CASCADE, related_name="crafting_session")
     created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
 
     class Meta:
-        verbose_name = "Crafting Log"
-        verbose_name_plural = "Crafting Logs"
-        ordering = ("-created_at",)
+        verbose_name = "Crafting Session"
+        verbose_name_plural = "Crafting Sessions"
 
     def __str__(self) -> str:
-        status = "Success" if self.success else "Failure"
-        return f"{status}: {self.recipe.name} for player {self.player_id}"
+        return f"Session for {self.player_id}"
+
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
+
+
+class CraftingSessionItem(models.Model):
+    """Ball instance added to a crafting session."""
+
+    session = models.ForeignKey(CraftingSession, on_delete=models.CASCADE, related_name="items")
+    ball_instance = models.ForeignKey(BallInstance, on_delete=models.CASCADE)
+
+    class Meta:
+        verbose_name = "Crafting Session Item"
+        verbose_name_plural = "Crafting Session Items"
+        unique_together = ("session", "ball_instance")
+
+    def __str__(self) -> str:
+        return f"{self.ball_instance} in session {self.session_id}"
