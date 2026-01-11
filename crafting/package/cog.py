@@ -197,8 +197,8 @@ class CraftingCog(commands.GroupCog, name="craft"):
             created_ids.append(new_instance.pk)
 
         ids_display = ", ".join(f"#{pk:0X}" for pk in created_ids)
-        special_suffix = f" with {recipe.result_special}" if recipe.result_special else ""
-        return f"Crafted {recipe.result_quantity} × {ball.country}{special_suffix} ({ids_display})."
+        special_suffix = f" with {recipe.result_special.name}" if recipe.result_special else ""
+        return f"Crafted {recipe.result_quantity} × {ball.country}{special_suffix}\n**Pixels:** {ids_display}"
 
     async def _log_attempt(self, player: Player, recipe: CraftingRecipe, outcome: CraftOutcome) -> None:
         await CraftingLog.objects.acreate(
@@ -238,13 +238,24 @@ class CraftingCog(commands.GroupCog, name="craft"):
         if not ok:
             return CraftOutcome(False, reason)
 
-        async with transaction.atomic():
+        # Wrap transaction in sync function since transaction.atomic() doesn't support async
+        async def do_craft():
+            # Do the async operations first
             await self._consume_ingredients(player, ingredients)
             result = await self._grant_result(player, recipe)
-            state.update_cooldown()
-            profile.update_cooldown()
-            await state.asave(update_fields=("last_crafted_at",))
-            await profile.asave(update_fields=("last_crafted_at",))
+            
+            # Update cooldowns in a sync transaction
+            def update_cooldowns():
+                with transaction.atomic():
+                    state.update_cooldown()
+                    profile.update_cooldown()
+                    state.save(update_fields=("last_crafted_at",))
+                    profile.save(update_fields=("last_crafted_at",))
+            
+            await sync_to_async(update_cooldowns)()
+            return result
+        
+        result = await do_craft()
         return CraftOutcome(True, "Craft successful!", result_summary=result)
 
     def _recipe_embed(
@@ -253,21 +264,24 @@ class CraftingCog(commands.GroupCog, name="craft"):
         embed = discord.Embed(title=recipe.name, description=recipe.description or "No description provided.")
         # Use provided ingredients list (already fetched) to avoid sync query
         ingredient_list = ingredients if ingredients is not None else []
-        ingredients_text = "\n".join(ingredient_summary(i) for i in ingredient_list) or "None"
+        # Filter out items, only show balls
+        ball_ingredients = [i for i in ingredient_list if i.ingredient_type == CraftingIngredient.INGREDIENT_BALL]
+        ingredients_text = "\n".join(ingredient_summary(i) for i in ball_ingredients) or "None"
         embed.add_field(name="Ingredients", value=ingredients_text, inline=False)
-        if recipe.result_type == CraftingRecipe.RESULT_ITEM:
-            # result_item should be cached from select_related
-            result_item_name = recipe.result_item.name if recipe.result_item else "Unknown Item"
-            result = f"{recipe.result_quantity} × {result_item_name}"
-        else:
-            # result_ball and result_special should be cached from select_related
-            ball_name = recipe.result_ball.country if recipe.result_ball else "Unknown Ball"
+        
+        # Only show ball results (remove items)
+        if recipe.result_type == CraftingRecipe.RESULT_BALL and recipe.result_ball:
+            # result_ball should be cached from select_related
+            ball_name = recipe.result_ball.country
             special = f" with {recipe.result_special.name}" if recipe.result_special else ""
             result = f"{recipe.result_quantity} × {ball_name}{special}"
-        embed.add_field(name="Result", value=result, inline=False)
+            embed.add_field(name="Result", value=result, inline=False)
+        elif recipe.result_type == CraftingRecipe.RESULT_BALL:
+            embed.add_field(name="Result", value="No result configured", inline=False)
+        
         cooldown_text = format_seconds(recipe.cooldown_seconds) if recipe.cooldown_seconds else "None"
-        embed.add_field(name="Recipe Cooldown", value=cooldown_text, inline=True)
-        embed.add_field(name="Auto-Crafting", value="Enabled" if recipe.allow_auto else "Disabled", inline=True)
+        embed.add_field(name="Cooldown", value=cooldown_text, inline=True)
+        embed.add_field(name="Auto-Craft", value="✅ Enabled" if recipe.allow_auto else "❌ Disabled", inline=True)
         return embed
 
     # ----- Commands -----
@@ -302,7 +316,7 @@ class CraftingCog(commands.GroupCog, name="craft"):
         
         await interaction.response.send_message(embeds=embeds, ephemeral=True)
 
-    @app_commands.command(name="craft", description="Craft a recipe if requirements are met.")
+    @app_commands.command(description="Craft a recipe if requirements are met.")
     @app_commands.describe(recipe="Recipe name to craft")
     @app_commands.autocomplete(recipe=recipe_autocomplete)
     @app_commands.checks.bot_has_permissions(send_messages=True, embed_links=True)
