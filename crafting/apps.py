@@ -1,8 +1,6 @@
 from django.apps import AppConfig
 
-
-class ReportConfig(AppConfig):
+class CraftingConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
-    name = "craft"
-    verbose_name = "Crafting package"
+    name = "crafting"
     dpy_package = "crafting.package"
