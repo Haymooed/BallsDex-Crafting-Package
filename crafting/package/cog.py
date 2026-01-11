@@ -275,13 +275,13 @@ class CraftingCog(commands.GroupCog, name="craft"):
                 for _ in range(recipe.result_quantity):
                     new_instance = BallInstance.objects.create(
                         ball=recipe.result_ball,
-                        player=player,
-                        special=recipe.result_special,
-                        attack_bonus=0,
-                        health_bonus=0,
-                        spawned_time=timezone.now(),
-                        catch_date=timezone.now(),
-                    )
+            player=player,
+            special=recipe.result_special,
+            attack_bonus=0,
+            health_bonus=0,
+            spawned_time=timezone.now(),
+            catch_date=timezone.now(),
+        )
                     created_ids.append(new_instance.pk)
 
                 # Delete session items that were consumed
@@ -297,10 +297,87 @@ class CraftingCog(commands.GroupCog, name="craft"):
 
         return {"success": True, "message": message}
 
+    # ----- Autocomplete functions -----
+
+    async def instance_autocomplete_add(
+        self, interaction: Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete for adding instances - shows user's balls not in session."""
+        player = await ensure_player(interaction.user)
+        
+        # Get current session if exists
+        try:
+            session = await CraftingSession.objects.prefetch_related("items__ball_instance").aget(player=player)
+            session_instance_ids = await sync_to_async(list)(
+                session.items.values_list("ball_instance_id", flat=True)
+            )
+        except CraftingSession.DoesNotExist:
+            session_instance_ids = []
+
+        # Get user's ball instances not in session
+        queryset = BallInstance.objects.filter(
+            player=player, deleted=False
+        ).exclude(id__in=session_instance_ids).select_related("ball", "special")[:25]
+
+        if current:
+            # Try to parse as hex ID
+            try:
+                current_hex = current.strip().lstrip("#")
+                current_int = int(current_hex, 16)
+                queryset = queryset.filter(id=current_int)
+            except ValueError:
+                # Search by ball name
+                queryset = queryset.filter(ball__country__icontains=current)
+
+        instances = await sync_to_async(list)(queryset)
+        choices = []
+        for instance in instances:
+            desc = instance.short_description()
+            # Format as hex ID for the value
+            value = f"{instance.pk:X}"
+            choices.append(app_commands.Choice(name=desc, value=value))
+
+        return choices[:25]
+
+    async def instance_autocomplete_remove(
+        self, interaction: Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete for removing instances - shows balls in current session."""
+        player = await ensure_player(interaction.user)
+        
+        # Get current session
+        try:
+            session = await CraftingSession.objects.prefetch_related(
+                "items__ball_instance__ball", "items__ball_instance__special"
+            ).aget(player=player)
+        except CraftingSession.DoesNotExist:
+            return []
+
+        # Get session items
+        items = await sync_to_async(list)(
+            session.items.select_related("ball_instance__ball", "ball_instance__special").all()
+        )
+
+        choices = []
+        for item in items:
+            instance = item.ball_instance
+            desc = instance.short_description()
+            value = f"{instance.pk:X}"
+            
+            # Filter by current if provided
+            if current:
+                if current.lower() not in desc.lower() and current.upper() not in value:
+                    continue
+            
+            choices.append(app_commands.Choice(name=desc, value=value))
+
+        return choices[:25]
+
     # ----- Commands -----
 
     @app_commands.command(name="add", description="Add a specific ball instance to your crafting session.")
     @app_commands.describe(instance_id="The ID of the ball instance to add (e.g., #ABC123)")
+    @app_commands.autocomplete(instance_id=instance_autocomplete_add)
     @app_commands.checks.bot_has_permissions(send_messages=True, embed_links=True)
     async def craft_add(self, interaction: Interaction, instance_id: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -348,6 +425,7 @@ class CraftingCog(commands.GroupCog, name="craft"):
 
     @app_commands.command(name="remove", description="Remove a specific ball instance from your crafting session.")
     @app_commands.describe(instance_id="The ID of the ball instance to remove (e.g., #ABC123)")
+    @app_commands.autocomplete(instance_id=instance_autocomplete_remove)
     @app_commands.checks.bot_has_permissions(send_messages=True, embed_links=True)
     async def craft_remove(self, interaction: Interaction, instance_id: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
